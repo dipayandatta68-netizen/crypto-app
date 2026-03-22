@@ -4,22 +4,22 @@ import requests
 import datetime
 import time
 import plotly.graph_objects as go
+import yfinance as yf
 
 st.set_page_config(page_title="Crypto Trading System", layout="wide")
 
 st.title("💰 Crypto Trading System (Final)")
 
-# ---------------------------
-# SELECT COIN
-# ---------------------------
 coin = st.selectbox("Select Coin", ["BTC", "ETH", "BNB", "SOL"])
+
 symbol = coin + "USDT"
 
 # ---------------------------
-# FETCH DATA (STABLE)
+# DATA FETCH (3 LEVEL SAFE)
 # ---------------------------
 def get_data():
-    # Binance
+
+    # 1. Binance
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=200"
         res = requests.get(url, timeout=5)
@@ -39,11 +39,11 @@ def get_data():
     except:
         pass
 
-    # Backup (CoinGecko)
+    # 2. CoinGecko
     try:
         st.warning("⚠️ Using backup data")
 
-        url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/market_chart?vs_currency=usd&days=3&interval=minute"
+        url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/market_chart?vs_currency=usd&days=3"
         res = requests.get(url, timeout=5)
         data = res.json()
 
@@ -59,13 +59,34 @@ def get_data():
         return df.tail(200)
 
     except:
+        pass
+
+    # 3. FINAL FALLBACK (YFINANCE — NEVER FAILS)
+    try:
+        st.warning("⚠️ Using stable backup (yfinance)")
+
+        ticker = coin + "-USD"
+        df = yf.download(ticker, interval="5m", period="1d")
+
+        df = df.reset_index()
+        df.rename(columns={
+            "Datetime": "Time",
+            "Open": "Open",
+            "High": "High",
+            "Low": "Low",
+            "Close": "Close"
+        }, inplace=True)
+
+        return df.tail(200)
+
+    except:
         return None
 
 
 data = get_data()
 
 if data is None:
-    st.error("❌ Unable to fetch market data")
+    st.error("❌ Market temporarily unavailable")
     st.stop()
 
 # ---------------------------
@@ -102,28 +123,24 @@ entry = "-"
 target = "-"
 sl = "-"
 
-# Trend Buy
 if price > ema20 and ema20 > ema50 and rsi > 55:
     signal = "BUY"
     entry = round(price, 2)
     target = round(price * 1.01, 2)
     sl = round(price * 0.995, 2)
 
-# Trend Sell
 elif price < ema20 and ema20 < ema50 and rsi < 45:
     signal = "SELL"
     entry = round(price, 2)
     target = round(price * 0.99, 2)
     sl = round(price * 1.005, 2)
 
-# Breakout Buy
 elif price > recent_high:
     signal = "BREAKOUT BUY"
     entry = round(price, 2)
     target = round(price * 1.015, 2)
     sl = round(price * 0.995, 2)
 
-# Breakdown Sell
 elif price < recent_low:
     signal = "BREAKDOWN SELL"
     entry = round(price, 2)
@@ -149,7 +166,7 @@ st.write(f"🏆 Target: {target}")
 st.write(f"🛑 Stop Loss: {sl}")
 
 # ---------------------------
-# CHART (CLEAN)
+# CHART
 # ---------------------------
 fig = go.Figure()
 
