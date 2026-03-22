@@ -1,186 +1,154 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import requests
-import datetime
-import time
-import plotly.graph_objects as go
 import yfinance as yf
+from datetime import datetime
 
 st.set_page_config(page_title="Crypto Trading System", layout="wide")
 
 st.title("💰 Crypto Trading System (Final)")
 
-coin = st.selectbox("Select Coin", ["BTC", "ETH", "BNB", "SOL"])
+coin = st.selectbox("Select Coin", ["BTC", "ETH", "BNB"])
 
-symbol = coin + "USDT"
+symbol_map = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "BNB": "BNBUSDT"
+}
 
-# ---------------------------
-# DATA FETCH (3 LEVEL SAFE)
-# ---------------------------
-def get_data():
+symbol = symbol_map[coin]
 
-    # 1. Binance
-    try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=200"
-        res = requests.get(url, timeout=5)
-        data = res.json()
+# -----------------------------
+# DATA FETCH FUNCTION
+# -----------------------------
+def get_binance_data(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=150"
+    data = requests.get(url).json()
 
-        df = pd.DataFrame(data)
-        df = df[[0,1,2,3,4]]
-        df.columns = ["Time","Open","High","Low","Close"]
+    df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume",
+        "close_time","qav","trades","tbbav","tbqav","ignore"
+    ])
 
-        df["Time"] = pd.to_datetime(df["Time"], unit='ms')
+    df["time"] = pd.to_datetime(df["time"], unit='ms')
+    df["close"] = pd.to_numeric(df["close"])
+    df["high"] = pd.to_numeric(df["high"])
+    df["low"] = pd.to_numeric(df["low"])
 
-        for col in ["Open","High","Low","Close"]:
-            df[col] = df[col].astype(float)
-
-        return df
-
-    except:
-        pass
-
-    # 2. CoinGecko
-    try:
-        st.warning("⚠️ Using backup data")
-
-        url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/market_chart?vs_currency=usd&days=3"
-        res = requests.get(url, timeout=5)
-        data = res.json()
-
-        prices = data["prices"]
-
-        df = pd.DataFrame(prices, columns=["Time","Close"])
-        df["Time"] = pd.to_datetime(df["Time"], unit='ms')
-
-        df["Open"] = df["Close"]
-        df["High"] = df["Close"]
-        df["Low"] = df["Close"]
-
-        return df.tail(200)
-
-    except:
-        pass
-
-    # 3. FINAL FALLBACK (YFINANCE — NEVER FAILS)
-    try:
-        st.warning("⚠️ Using stable backup (yfinance)")
-
-        ticker = coin + "-USD"
-        df = yf.download(ticker, interval="5m", period="1d")
-
-        df = df.reset_index()
-        df.rename(columns={
-            "Datetime": "Time",
-            "Open": "Open",
-            "High": "High",
-            "Low": "Low",
-            "Close": "Close"
-        }, inplace=True)
-
-        return df.tail(200)
-
-    except:
-        return None
+    return df[["time","close","high","low"]]
 
 
-data = get_data()
+def get_backup_data(coin):
+    df = yf.download(f"{coin}-USD", interval="5m", period="1d")
 
-if data is None:
-    st.error("❌ Market temporarily unavailable")
+    df = df.reset_index()
+
+    if "Datetime" in df.columns:
+        df.rename(columns={"Datetime": "time"}, inplace=True)
+    elif "Date" in df.columns:
+        df.rename(columns={"Date": "time"}, inplace=True)
+
+    df.rename(columns={
+        "Close": "close",
+        "High": "high",
+        "Low": "low"
+    }, inplace=True)
+
+    return df[["time","close","high","low"]]
+
+
+# -----------------------------
+# GET DATA
+# -----------------------------
+try:
+    df = get_binance_data(symbol)
+    st.success("✅ Live data (Binance)")
+except:
+    st.warning("⚠ Using backup (Yahoo Finance)")
+    df = get_backup_data(coin)
+
+
+# -----------------------------
+# CLEAN DATA
+# -----------------------------
+df = df.dropna()
+
+if len(df) < 50:
+    st.error("❌ Not enough data")
     st.stop()
 
-# ---------------------------
+
+# -----------------------------
 # INDICATORS
-# ---------------------------
-data["EMA20"] = data["Close"].ewm(span=20).mean()
-data["EMA50"] = data["Close"].ewm(span=50).mean()
+# -----------------------------
+df["EMA20"] = df["close"].ewm(span=20).mean()
+df["EMA50"] = df["close"].ewm(span=50).mean()
 
-delta = data["Close"].diff()
-gain = delta.clip(lower=0)
-loss = -delta.clip(upper=0)
+delta = df["close"].diff()
+gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+rs = gain / loss
+df["RSI"] = 100 - (100 / (1 + rs))
 
-avg_gain = gain.rolling(14).mean()
-avg_loss = loss.rolling(14).mean()
+latest = df.iloc[-1]
 
-rs = avg_gain / avg_loss
-data["RSI"] = 100 - (100 / (1 + rs))
+price = float(latest["close"])
+ema20 = float(latest["EMA20"])
+ema50 = float(latest["EMA50"])
+rsi = float(latest["RSI"])
 
-# ---------------------------
+
+# -----------------------------
 # SIGNAL LOGIC
-# ---------------------------
-latest = data.iloc[-1]
+# -----------------------------
+signal = "HOLD"
+confidence = 0
 
-price = latest["Close"]
-ema20 = latest["EMA20"]
-ema50 = latest["EMA50"]
-rsi = latest["RSI"]
-
-recent_high = data["High"].tail(20).max()
-recent_low = data["Low"].tail(20).min()
-
-signal = "NO TRADE"
-entry = "-"
-target = "-"
-sl = "-"
-
-if price > ema20 and ema20 > ema50 and rsi > 55:
+if price > ema20 > ema50 and rsi < 70:
     signal = "BUY"
-    entry = round(price, 2)
-    target = round(price * 1.01, 2)
-    sl = round(price * 0.995, 2)
+    confidence = 80
 
-elif price < ema20 and ema20 < ema50 and rsi < 45:
+elif price < ema20 < ema50 and rsi > 30:
     signal = "SELL"
-    entry = round(price, 2)
-    target = round(price * 0.99, 2)
-    sl = round(price * 1.005, 2)
+    confidence = 80
 
-elif price > recent_high:
-    signal = "BREAKOUT BUY"
-    entry = round(price, 2)
-    target = round(price * 1.015, 2)
-    sl = round(price * 0.995, 2)
 
-elif price < recent_low:
-    signal = "BREAKDOWN SELL"
-    entry = round(price, 2)
-    target = round(price * 0.985, 2)
-    sl = round(price * 1.005, 2)
+# -----------------------------
+# ENTRY / TARGET / SL
+# -----------------------------
+entry = price
+target = price * (1.02 if signal == "BUY" else 0.98)
+stop_loss = price * (0.98 if signal == "BUY" else 1.02)
 
-# ---------------------------
+
+# -----------------------------
 # DISPLAY
-# ---------------------------
+# -----------------------------
 st.subheader(f"💲 Price: ${round(price,2)}")
 
-time_now = datetime.datetime.now().strftime("%I:%M %p")
-
-if "BUY" in signal:
-    st.success(f"📈 {signal} at {time_now}")
-elif "SELL" in signal:
-    st.error(f"📉 {signal} at {time_now}")
+if signal == "BUY":
+    st.success(f"📈 BUY SIGNAL")
+elif signal == "SELL":
+    st.error(f"📉 SELL SIGNAL")
 else:
-    st.warning("⚠️ NO TRADE")
+    st.warning("⚠ HOLD")
 
-st.write(f"🎯 Entry: {entry}")
-st.write(f"🏆 Target: {target}")
-st.write(f"🛑 Stop Loss: {sl}")
+st.write(f"Confidence: {confidence}%")
 
-# ---------------------------
+st.write(f"Entry: {round(entry,2)}")
+st.write(f"Target: {round(target,2)}")
+st.write(f"Stop Loss: {round(stop_loss,2)}")
+
+
+# -----------------------------
+# TIME (12 HOUR FORMAT)
+# -----------------------------
+now = datetime.now().strftime("%I:%M %p")
+st.write(f"🕒 Signal Time: {now}")
+
+
+# -----------------------------
 # CHART
-# ---------------------------
-fig = go.Figure()
-
-fig.add_trace(go.Scatter(x=data["Time"], y=data["Close"], name="Price"))
-fig.add_trace(go.Scatter(x=data["Time"], y=data["EMA20"], name="EMA20"))
-fig.add_trace(go.Scatter(x=data["Time"], y=data["EMA50"], name="EMA50"))
-
-fig.update_layout(height=500)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------
-# LIVE MODE
-# ---------------------------
-if st.toggle("⚡ Live Mode (5s refresh)"):
-    time.sleep(5)
-    st.rerun()
+# -----------------------------
+st.line_chart(df.set_index("time")[["close","EMA20","EMA50"]])
