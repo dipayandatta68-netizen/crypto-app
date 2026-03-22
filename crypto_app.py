@@ -23,62 +23,67 @@ symbol = symbol_map[coin]
 # BINANCE DATA
 # -----------------------------
 def get_binance_data(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=500"
-    res = requests.get(url, timeout=10)
-    data = res.json()
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=500"
+        res = requests.get(url, timeout=10)
+        data = res.json()
 
-    if not isinstance(data, list) or len(data) < 50:
+        if not isinstance(data, list) or len(data) < 50:
+            return None
+
+        df = pd.DataFrame(data, columns=[
+            "time","open","high","low","close","volume",
+            "close_time","qav","trades","tbbav","tbqav","ignore"
+        ])
+
+        df["time"] = pd.to_datetime(df["time"], unit='ms')
+        df["close"] = pd.to_numeric(df["close"], errors='coerce')
+        df["high"] = pd.to_numeric(df["high"], errors='coerce')
+        df["low"] = pd.to_numeric(df["low"], errors='coerce')
+
+        return df[["time","close","high","low"]]
+
+    except:
         return None
-
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "close_time","qav","trades","tbbav","tbqav","ignore"
-    ])
-
-    df["time"] = pd.to_datetime(df["time"], unit='ms')
-    df["close"] = pd.to_numeric(df["close"], errors='coerce')
-    df["high"] = pd.to_numeric(df["high"], errors='coerce')
-    df["low"] = pd.to_numeric(df["low"], errors='coerce')
-
-    return df[["time","close","high","low"]]
 
 
 # -----------------------------
 # BACKUP DATA
 # -----------------------------
 def get_backup_data(coin):
-    df = yf.download(f"{coin}-USD", interval="15m", period="2d")
+    try:
+        df = yf.download(f"{coin}-USD", interval="15m", period="2d")
 
-    if df is None or df.empty:
+        if df is None or df.empty:
+            return None
+
+        df = df.reset_index()
+
+        if "Datetime" in df.columns:
+            df.rename(columns={"Datetime": "time"}, inplace=True)
+        elif "Date" in df.columns:
+            df.rename(columns={"Date": "time"}, inplace=True)
+
+        df.rename(columns={
+            "Close": "close",
+            "High": "high",
+            "Low": "low"
+        }, inplace=True)
+
+        return df[["time","close","high","low"]]
+
+    except:
         return None
-
-    df = df.reset_index()
-
-    if "Datetime" in df.columns:
-        df.rename(columns={"Datetime": "time"}, inplace=True)
-    elif "Date" in df.columns:
-        df.rename(columns={"Date": "time"}, inplace=True)
-
-    df.rename(columns={
-        "Close": "close",
-        "High": "high",
-        "Low": "low"
-    }, inplace=True)
-
-    return df[["time","close","high","low"]]
 
 
 # -----------------------------
 # LOAD DATA (SMART FALLBACK)
 # -----------------------------
-df = None
+df = get_binance_data(symbol)
 
-try:
-    df = get_binance_data(symbol)
-    if df is None or len(df) < 200:
-        raise Exception("Weak Binance data")
+if df is not None and len(df) >= 200:
     st.success("✅ Live data (Binance)")
-except:
+else:
     st.warning("⚠ Using stable backup (Yahoo Finance)")
     df = get_backup_data(coin)
 
@@ -111,7 +116,7 @@ rsi = float(latest["RSI"])
 
 
 # -----------------------------
-# SIGNAL LOGIC (SMART)
+# SIGNAL LOGIC
 # -----------------------------
 signal = "HOLD"
 confidence = 50
@@ -160,12 +165,26 @@ st.write(f"Entry: {round(entry,2)}")
 st.write(f"Target: {round(target,2)}")
 st.write(f"Stop Loss: {round(stop_loss,2)}")
 
-# TIME (12H)
+# TIME (12H FORMAT)
 now = datetime.now().strftime("%I:%M %p")
 st.write(f"🕒 Signal Time: {now}")
 
+
 # -----------------------------
-# CHART
+# SAFE CHART (FINAL FIX)
 # -----------------------------
-chart = df.set_index("time")[["close","EMA20","EMA50"]].tail(150)
-st.line_chart(chart)
+try:
+    chart = df.copy()
+
+    if "time" in chart.columns:
+        chart = chart.set_index("time")
+
+    chart = chart[["close", "EMA20", "EMA50"]].dropna().tail(150)
+
+    if len(chart) > 10:
+        st.line_chart(chart)
+    else:
+        st.warning("⚠ Chart data insufficient")
+
+except:
+    st.warning("⚠ Chart unavailable (data issue)")
