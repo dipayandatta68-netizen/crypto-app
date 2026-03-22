@@ -16,12 +16,13 @@ coin = st.selectbox("Select Coin", ["BTC", "ETH", "BNB", "SOL"])
 symbol = coin + "USDT"
 
 # ---------------------------
-# FETCH DATA
+# FETCH DATA (STABLE)
 # ---------------------------
 def get_data():
+    # Binance
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=200"
-        res = requests.get(url)
+        res = requests.get(url, timeout=5)
         data = res.json()
 
         df = pd.DataFrame(data)
@@ -36,32 +37,35 @@ def get_data():
         return df
 
     except:
-        try:
-            st.warning("⚠️ Using backup data")
+        pass
 
-            url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/market_chart?vs_currency=usd&days=1"
-            res = requests.get(url)
-            data = res.json()
+    # Backup (CoinGecko)
+    try:
+        st.warning("⚠️ Using backup data")
 
-            prices = data["prices"]
-            df = pd.DataFrame(prices, columns=["Time","Close"])
+        url = f"https://api.coingecko.com/api/v3/coins/{coin.lower()}/market_chart?vs_currency=usd&days=3&interval=minute"
+        res = requests.get(url, timeout=5)
+        data = res.json()
 
-            df["Time"] = pd.to_datetime(df["Time"], unit='ms')
+        prices = data["prices"]
 
-            df["Open"] = df["Close"]
-            df["High"] = df["Close"]
-            df["Low"] = df["Close"]
+        df = pd.DataFrame(prices, columns=["Time","Close"])
+        df["Time"] = pd.to_datetime(df["Time"], unit='ms')
 
-            return df
+        df["Open"] = df["Close"]
+        df["High"] = df["Close"]
+        df["Low"] = df["Close"]
 
-        except:
-            return None
+        return df.tail(200)
+
+    except:
+        return None
 
 
 data = get_data()
 
-if data is None or len(data) < 50:
-    st.error("❌ Data not available")
+if data is None:
+    st.error("❌ Unable to fetch market data")
     st.stop()
 
 # ---------------------------
@@ -98,24 +102,28 @@ entry = "-"
 target = "-"
 sl = "-"
 
+# Trend Buy
 if price > ema20 and ema20 > ema50 and rsi > 55:
     signal = "BUY"
     entry = round(price, 2)
     target = round(price * 1.01, 2)
     sl = round(price * 0.995, 2)
 
+# Trend Sell
 elif price < ema20 and ema20 < ema50 and rsi < 45:
     signal = "SELL"
     entry = round(price, 2)
     target = round(price * 0.99, 2)
     sl = round(price * 1.005, 2)
 
+# Breakout Buy
 elif price > recent_high:
     signal = "BREAKOUT BUY"
     entry = round(price, 2)
     target = round(price * 1.015, 2)
     sl = round(price * 0.995, 2)
 
+# Breakdown Sell
 elif price < recent_low:
     signal = "BREAKDOWN SELL"
     entry = round(price, 2)
@@ -127,12 +135,12 @@ elif price < recent_low:
 # ---------------------------
 st.subheader(f"💲 Price: ${round(price,2)}")
 
-now = datetime.datetime.now().strftime("%I:%M %p")
+time_now = datetime.datetime.now().strftime("%I:%M %p")
 
 if "BUY" in signal:
-    st.success(f"📈 {signal} at {now}")
+    st.success(f"📈 {signal} at {time_now}")
 elif "SELL" in signal:
-    st.error(f"📉 {signal} at {now}")
+    st.error(f"📉 {signal} at {time_now}")
 else:
     st.warning("⚠️ NO TRADE")
 
@@ -141,7 +149,7 @@ st.write(f"🏆 Target: {target}")
 st.write(f"🛑 Stop Loss: {sl}")
 
 # ---------------------------
-# CHART
+# CHART (CLEAN)
 # ---------------------------
 fig = go.Figure()
 
