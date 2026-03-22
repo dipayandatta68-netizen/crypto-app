@@ -3,9 +3,6 @@ import pandas as pd
 import requests
 import time
 
-# ---------------------------
-# PAGE CONFIG
-# ---------------------------
 st.set_page_config(page_title="Crypto Intelligence Pro", layout="wide")
 
 st.title("🚀 Crypto Intelligence Pro")
@@ -16,51 +13,86 @@ st.title("🚀 Crypto Intelligence Pro")
 live_mode = st.toggle("⚡ Live Mode (3s refresh)", value=False)
 
 # ---------------------------
-# COIN SELECTION
+# COIN MAP (DUAL API SUPPORT)
 # ---------------------------
 coin_map = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "BNB": "BNBUSDT",
-    "SOL": "SOLUSDT"
+    "BTC": {"binance": "BTCUSDT", "coingecko": "bitcoin"},
+    "ETH": {"binance": "ETHUSDT", "coingecko": "ethereum"},
+    "BNB": {"binance": "BNBUSDT", "coingecko": "binancecoin"},
+    "SOL": {"binance": "SOLUSDT", "coingecko": "solana"}
 }
 
 selected_coin = st.selectbox("Select Coin", list(coin_map.keys()))
-symbol = coin_map[selected_coin]
 
 # ---------------------------
-# FETCH DATA (BINANCE)
+# BINANCE DATA (FAST)
 # ---------------------------
-def get_crypto_data(symbol="BTCUSDT", interval="1m", limit=100):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    
+def get_binance_data(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=100"
     try:
-        data = requests.get(url, timeout=10).json()
-        
+        res = requests.get(url, timeout=5)
+        data = res.json()
+
         if not data or isinstance(data, dict):
             return None
-        
+
         df = pd.DataFrame(data)
         df = df.iloc[:, :6]
         df.columns = ["Time","Open","High","Low","Close","Volume"]
-        
+
         df["Close"] = df["Close"].astype(float)
         df["Time"] = pd.to_datetime(df["Time"], unit="ms")
-        
+
         return df
 
     except:
         return None
 
 # ---------------------------
-# MAIN LOOP (LIVE MODE)
+# COINGECKO DATA (BACKUP)
+# ---------------------------
+def get_coingecko_data(symbol):
+    url = f"https://api.coingecko.com/api/v3/coins/{symbol}/market_chart?vs_currency=usd&days=1"
+    try:
+        res = requests.get(url, timeout=5)
+        data = res.json()
+
+        prices = data.get("prices", [])
+        if not prices:
+            return None
+
+        df = pd.DataFrame(prices, columns=["Time", "Close"])
+        df["Time"] = pd.to_datetime(df["Time"], unit="ms")
+
+        return df
+
+    except:
+        return None
+
+# ---------------------------
+# SMART FETCH (AUTO SWITCH)
+# ---------------------------
+def get_data():
+    binance_symbol = coin_map[selected_coin]["binance"]
+    cg_symbol = coin_map[selected_coin]["coingecko"]
+
+    data = get_binance_data(binance_symbol)
+
+    if data is None:
+        st.warning("⚠️ Binance failed → Switching to backup API")
+        data = get_coingecko_data(cg_symbol)
+
+    return data
+
+# ---------------------------
+# MAIN LOOP
 # ---------------------------
 while True:
-    
-    data = get_crypto_data(symbol)
 
-    if data is None or len(data) < 50:
-        st.warning("⚠️ Data not available")
+    data = get_data()
+
+    if data is None or len(data) < 20:
+        st.error("❌ Data not available")
     else:
         # ---------------------------
         # INDICATORS
@@ -75,23 +107,23 @@ while True:
         ema50 = latest["EMA50"]
 
         # ---------------------------
-        # SIGNAL LOGIC
+        # SIGNAL LOGIC (IMPROVED)
         # ---------------------------
-        if ema20 > ema50:
-            signal = "BUY"
+        if ema20 > ema50 and price > ema20:
+            signal = "BUY 🚀"
             color = "green"
-        elif ema20 < ema50:
-            signal = "SELL"
+        elif ema20 < ema50 and price < ema20:
+            signal = "SELL 🔻"
             color = "red"
         else:
-            signal = "WAIT"
+            signal = "WAIT ⏳"
             color = "yellow"
 
         # ---------------------------
         # DISPLAY
         # ---------------------------
         st.metric("💰 Price", f"${price:.2f}")
-        
+
         st.markdown(f"""
         <h2 style='color:{color};'>📊 Signal: {signal}</h2>
         """, unsafe_allow_html=True)
@@ -102,7 +134,7 @@ while True:
         st.line_chart(data.set_index("Time")[["Close","EMA20","EMA50"]])
 
     # ---------------------------
-    # LIVE REFRESH
+    # LIVE MODE REFRESH
     # ---------------------------
     if live_mode:
         time.sleep(3)
