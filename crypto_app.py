@@ -20,11 +20,15 @@ symbol_map = {
 symbol = symbol_map[coin]
 
 # -----------------------------
-# FETCH BINANCE DATA
+# BINANCE DATA
 # -----------------------------
 def get_binance_data(symbol):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=500"
-    data = requests.get(url, timeout=10).json()
+    res = requests.get(url, timeout=10)
+    data = res.json()
+
+    if not isinstance(data, list) or len(data) < 50:
+        return None
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
@@ -40,10 +44,13 @@ def get_binance_data(symbol):
 
 
 # -----------------------------
-# BACKUP DATA (YFINANCE)
+# BACKUP DATA
 # -----------------------------
 def get_backup_data(coin):
     df = yf.download(f"{coin}-USD", interval="15m", period="2d")
+
+    if df is None or df.empty:
+        return None
 
     df = df.reset_index()
 
@@ -62,24 +69,25 @@ def get_backup_data(coin):
 
 
 # -----------------------------
-# LOAD DATA
+# LOAD DATA (SMART FALLBACK)
 # -----------------------------
+df = None
+
 try:
     df = get_binance_data(symbol)
+    if df is None or len(df) < 200:
+        raise Exception("Weak Binance data")
     st.success("✅ Live data (Binance)")
 except:
-    st.warning("⚠ Using backup (Yahoo Finance)")
+    st.warning("⚠ Using stable backup (Yahoo Finance)")
     df = get_backup_data(coin)
 
-
-# -----------------------------
-# CLEAN DATA
-# -----------------------------
-df = df.dropna()
-
-if len(df) < 100:
-    st.error("❌ Not enough data")
+# FINAL SAFETY CHECK
+if df is None or len(df) < 50:
+    st.error("❌ Unable to fetch market data")
     st.stop()
+
+df = df.dropna()
 
 
 # -----------------------------
@@ -94,7 +102,6 @@ loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
 rs = gain / loss
 df["RSI"] = 100 - (100 / (1 + rs))
 
-
 latest = df.iloc[-1]
 
 price = float(latest["close"])
@@ -104,22 +111,22 @@ rsi = float(latest["RSI"])
 
 
 # -----------------------------
-# SIGNAL LOGIC (IMPROVED)
+# SIGNAL LOGIC (SMART)
 # -----------------------------
 signal = "HOLD"
 confidence = 50
 
-if price > ema20 > ema50 and rsi > 50 and rsi < 70:
+if price > ema20 > ema50 and 50 < rsi < 70:
     signal = "BUY"
     confidence = 85
 
-elif price < ema20 < ema50 and rsi < 50 and rsi > 30:
+elif price < ema20 < ema50 and 30 < rsi < 50:
     signal = "SELL"
     confidence = 85
 
 
 # -----------------------------
-# ENTRY / TARGET / STOP LOSS
+# TRADE PLAN
 # -----------------------------
 entry = price
 
@@ -137,33 +144,28 @@ else:
 
 
 # -----------------------------
-# DISPLAY
+# UI OUTPUT
 # -----------------------------
 st.subheader(f"💲 Price: ${round(price,2)}")
 
 if signal == "BUY":
-    st.success(f"📈 BUY SIGNAL")
+    st.success("📈 BUY SIGNAL")
 elif signal == "SELL":
-    st.error(f"📉 SELL SIGNAL")
+    st.error("📉 SELL SIGNAL")
 else:
     st.warning("⚠ HOLD")
 
 st.write(f"Confidence: {confidence}%")
-
 st.write(f"Entry: {round(entry,2)}")
 st.write(f"Target: {round(target,2)}")
 st.write(f"Stop Loss: {round(stop_loss,2)}")
 
-
-# -----------------------------
-# TIME (12H FORMAT)
-# -----------------------------
+# TIME (12H)
 now = datetime.now().strftime("%I:%M %p")
 st.write(f"🕒 Signal Time: {now}")
 
-
 # -----------------------------
-# CHART (CLEAN)
+# CHART
 # -----------------------------
-chart_data = df.set_index("time")[["close","EMA20","EMA50"]].tail(150)
-st.line_chart(chart_data)
+chart = df.set_index("time")[["close","EMA20","EMA50"]].tail(150)
+st.line_chart(chart)
