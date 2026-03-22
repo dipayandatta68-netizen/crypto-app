@@ -1,99 +1,62 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
-import yfinance as yf
+import pytz
 from datetime import datetime
+import yfinance as yf
 
 st.set_page_config(page_title="Crypto Trading System", layout="wide")
 
 st.title("💰 Crypto Trading System (Final)")
 
-coin = st.selectbox("Select Coin", ["BTC", "ETH", "BNB"])
+coin = st.selectbox("Select Coin", ["BTC", "ETH"])
 
-symbol_map = {
-    "BTC": "BTCUSDT",
-    "ETH": "ETHUSDT",
-    "BNB": "BNBUSDT"
-}
-
-symbol = symbol_map[coin]
+symbol = coin + "USDT"
 
 # -----------------------------
-# BINANCE DATA
+# FETCH DATA (BINANCE + BACKUP)
 # -----------------------------
-def get_binance_data(symbol):
+def get_binance():
     try:
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=500"
-        res = requests.get(url, timeout=10)
-        data = res.json()
-
-        if not isinstance(data, list) or len(data) < 50:
-            return None
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=120"
+        data = requests.get(url, timeout=5).json()
 
         df = pd.DataFrame(data, columns=[
-            "time","open","high","low","close","volume",
-            "close_time","qav","trades","tbbav","tbqav","ignore"
+            "time","o","h","l","c","v","ct","qv","n","tb","tq","i"
         ])
 
-        df["time"] = pd.to_datetime(df["time"], unit='ms')
-        df["close"] = pd.to_numeric(df["close"], errors='coerce')
-        df["high"] = pd.to_numeric(df["high"], errors='coerce')
-        df["low"] = pd.to_numeric(df["low"], errors='coerce')
+        df["close"] = df["c"].astype(float)
+        df["time"] = pd.to_datetime(df["time"], unit="ms")
 
-        return df[["time","close","high","low"]]
+        st.success("✅ Live data (Binance)")
+        return df
 
     except:
         return None
 
 
-# -----------------------------
-# BACKUP DATA
-# -----------------------------
-def get_backup_data(coin):
+def get_backup():
     try:
-        df = yf.download(f"{coin}-USD", interval="15m", period="2d")
+        ticker = coin + "-USD"
+        df = yf.download(ticker, period="1d", interval="1m")
 
-        if df is None or df.empty:
-            return None
+        df = df.rename(columns={"Close": "close"})
+        df["time"] = df.index
 
-        df = df.reset_index()
-
-        if "Datetime" in df.columns:
-            df.rename(columns={"Datetime": "time"}, inplace=True)
-        elif "Date" in df.columns:
-            df.rename(columns={"Date": "time"}, inplace=True)
-
-        df.rename(columns={
-            "Close": "close",
-            "High": "high",
-            "Low": "low"
-        }, inplace=True)
-
-        return df[["time","close","high","low"]]
+        st.warning("⚠ Using backup (Yahoo Finance)")
+        return df.reset_index()
 
     except:
         return None
 
 
-# -----------------------------
-# LOAD DATA (SMART FALLBACK)
-# -----------------------------
-df = get_binance_data(symbol)
+df = get_binance()
+if df is None:
+    df = get_backup()
 
-if df is not None and len(df) >= 200:
-    st.success("✅ Live data (Binance)")
-else:
-    st.warning("⚠ Using stable backup (Yahoo Finance)")
-    df = get_backup_data(coin)
-
-# FINAL SAFETY CHECK
-if df is None or len(df) < 50:
-    st.error("❌ Unable to fetch market data")
+if df is None or len(df) < 30:
+    st.error("❌ Unable to fetch enough data")
     st.stop()
-
-df = df.dropna()
-
 
 # -----------------------------
 # INDICATORS
@@ -101,90 +64,93 @@ df = df.dropna()
 df["EMA20"] = df["close"].ewm(span=20).mean()
 df["EMA50"] = df["close"].ewm(span=50).mean()
 
+# RSI
 delta = df["close"].diff()
-gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-rs = gain / loss
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
+
+rs = avg_gain / avg_loss
 df["RSI"] = 100 - (100 / (1 + rs))
 
-latest = df.iloc[-1]
-
-price = float(latest["close"])
-ema20 = float(latest["EMA20"])
-ema50 = float(latest["EMA50"])
-rsi = float(latest["RSI"])
-
+# -----------------------------
+# LATEST VALUES
+# -----------------------------
+price = float(df["close"].iloc[-1])
+ema20 = float(df["EMA20"].iloc[-1])
+ema50 = float(df["EMA50"].iloc[-1])
+rsi = float(df["RSI"].iloc[-1])
 
 # -----------------------------
-# SIGNAL LOGIC
+# SIGNAL LOGIC (REDUCED HOLD)
 # -----------------------------
 signal = "HOLD"
 confidence = 50
 
-if price > ema20 > ema50 and 50 < rsi < 70:
+# 🔥 More aggressive logic
+if price > ema20 and ema20 > ema50:
     signal = "BUY"
-    confidence = 85
+    confidence = 75
 
-elif price < ema20 < ema50 and 30 < rsi < 50:
+elif price < ema20 and ema20 < ema50:
     signal = "SELL"
-    confidence = 85
+    confidence = 75
 
+# Extra push using RSI
+if rsi < 40:
+    signal = "BUY"
+    confidence = 80
+
+elif rsi > 60:
+    signal = "SELL"
+    confidence = 80
 
 # -----------------------------
-# TRADE PLAN
+# TARGET / SL
 # -----------------------------
-entry = price
+target = price * (1.01 if signal == "BUY" else 0.99)
+stoploss = price * (0.99 if signal == "BUY" else 1.01)
+
+# -----------------------------
+# TIME (IST FIX)
+# -----------------------------
+ist = pytz.timezone("Asia/Kolkata")
+now = datetime.now(ist).strftime("%I:%M %p")
+
+# -----------------------------
+# DISPLAY
+# -----------------------------
+st.subheader(f"💲 Price: ${price:.2f}")
 
 if signal == "BUY":
-    target = price * 1.025
-    stop_loss = price * 0.98
-
+    st.success(f"🟢 BUY")
 elif signal == "SELL":
-    target = price * 0.975
-    stop_loss = price * 1.02
-
+    st.error(f"🔴 SELL")
 else:
-    target = price
-    stop_loss = price
-
-
-# -----------------------------
-# UI OUTPUT
-# -----------------------------
-st.subheader(f"💲 Price: ${round(price,2)}")
-
-if signal == "BUY":
-    st.success("📈 BUY SIGNAL")
-elif signal == "SELL":
-    st.error("📉 SELL SIGNAL")
-else:
-    st.warning("⚠ HOLD")
+    st.warning("🟡 HOLD")
 
 st.write(f"Confidence: {confidence}%")
-st.write(f"Entry: {round(entry,2)}")
-st.write(f"Target: {round(target,2)}")
-st.write(f"Stop Loss: {round(stop_loss,2)}")
-
-# TIME (12H FORMAT)
-now = datetime.now().strftime("%I:%M %p")
+st.write(f"Entry: {price:.2f}")
+st.write(f"Target: {target:.2f}")
+st.write(f"Stop Loss: {stoploss:.2f}")
 st.write(f"🕒 Signal Time: {now}")
 
-
 # -----------------------------
-# SAFE CHART (FINAL FIX)
+# CHART (FIXED)
 # -----------------------------
 try:
     chart = df.copy()
+    chart = chart.set_index("time")
 
-    if "time" in chart.columns:
-        chart = chart.set_index("time")
+    chart = chart[["close", "EMA20", "EMA50"]]
+    chart = chart.dropna()
 
-    chart = chart[["close", "EMA20", "EMA50"]].dropna().tail(150)
-
-    if len(chart) > 10:
-        st.line_chart(chart)
+    if len(chart) > 20:
+        st.line_chart(chart.tail(120))
     else:
-        st.warning("⚠ Chart data insufficient")
+        st.warning("⚠ Not enough data for chart")
 
 except:
-    st.warning("⚠ Chart unavailable (data issue)")
+    st.warning("⚠ Chart error handled")
