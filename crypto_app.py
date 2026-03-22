@@ -1,39 +1,32 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
+from datetime import datetime
 
-st.set_page_config(page_title="Crypto Intelligence Pro", layout="wide")
+st.set_page_config(page_title="Crypto Trading System", layout="wide")
 
-st.title("🚀 Crypto Intelligence Pro")
-
-# ---------------------------
-# LIVE MODE
-# ---------------------------
-live_mode = st.toggle("⚡ Live Mode (3s refresh)", value=False)
+st.title("💰 Crypto Trading System (Final)")
 
 # ---------------------------
-# COIN MAP (DUAL API SUPPORT)
+# COINS
 # ---------------------------
 coin_map = {
     "BTC": {"binance": "BTCUSDT", "coingecko": "bitcoin"},
     "ETH": {"binance": "ETHUSDT", "coingecko": "ethereum"},
-    "BNB": {"binance": "BNBUSDT", "coingecko": "binancecoin"},
     "SOL": {"binance": "SOLUSDT", "coingecko": "solana"}
 }
 
-selected_coin = st.selectbox("Select Coin", list(coin_map.keys()))
+coin = st.selectbox("Select Coin", list(coin_map.keys()))
 
 # ---------------------------
-# BINANCE DATA (FAST)
+# DATA FETCH
 # ---------------------------
-def get_binance_data(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=100"
+def get_binance(symbol):
     try:
-        res = requests.get(url, timeout=5)
-        data = res.json()
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=150"
+        data = requests.get(url, timeout=5).json()
 
-        if not data or isinstance(data, dict):
+        if isinstance(data, dict):
             return None
 
         df = pd.DataFrame(data)
@@ -41,103 +34,135 @@ def get_binance_data(symbol):
         df.columns = ["Time","Open","High","Low","Close","Volume"]
 
         df["Close"] = df["Close"].astype(float)
+        df["Low"] = df["Low"].astype(float)
+        df["High"] = df["High"].astype(float)
         df["Time"] = pd.to_datetime(df["Time"], unit="ms")
 
         return df
-
     except:
         return None
 
-# ---------------------------
-# COINGECKO DATA (BACKUP)
-# ---------------------------
-def get_coingecko_data(symbol):
-    url = f"https://api.coingecko.com/api/v3/coins/{symbol}/market_chart?vs_currency=usd&days=1"
+
+def get_coingecko(symbol):
     try:
-        res = requests.get(url, timeout=5)
-        data = res.json()
+        url = f"https://api.coingecko.com/api/v3/coins/{symbol}/market_chart?vs_currency=usd&days=1"
+        data = requests.get(url).json()
 
         prices = data.get("prices", [])
-        if not prices:
-            return None
-
-        df = pd.DataFrame(prices, columns=["Time", "Close"])
+        df = pd.DataFrame(prices, columns=["Time","Close"])
         df["Time"] = pd.to_datetime(df["Time"], unit="ms")
 
         return df
-
     except:
         return None
 
-# ---------------------------
-# SMART FETCH (AUTO SWITCH)
-# ---------------------------
+
 def get_data():
-    binance_symbol = coin_map[selected_coin]["binance"]
-    cg_symbol = coin_map[selected_coin]["coingecko"]
+    df = get_binance(coin_map[coin]["binance"])
 
-    data = get_binance_data(binance_symbol)
+    if df is None:
+        st.warning("⚠️ Using backup data")
+        df = get_coingecko(coin_map[coin]["coingecko"])
 
-    if data is None:
-        st.warning("⚠️ Binance failed → Switching to backup API")
-        data = get_coingecko_data(cg_symbol)
+    return df
 
-    return data
+
+data = get_data()
+
+if data is None or len(data) < 50:
+    st.error("❌ Data not available")
+    st.stop()
 
 # ---------------------------
-# MAIN LOOP
+# INDICATORS
 # ---------------------------
-while True:
+data["EMA20"] = data["Close"].ewm(span=20).mean()
+data["EMA50"] = data["Close"].ewm(span=50).mean()
 
-    data = get_data()
+# RSI
+delta = data["Close"].diff()
+gain = delta.clip(lower=0)
+loss = -delta.clip(upper=0)
+avg_gain = gain.rolling(14).mean()
+avg_loss = loss.rolling(14).mean()
+rs = avg_gain / avg_loss
+data["RSI"] = 100 - (100 / (1 + rs))
 
-    if data is None or len(data) < 20:
-        st.error("❌ Data not available")
-    else:
-        # ---------------------------
-        # INDICATORS
-        # ---------------------------
-        data["EMA20"] = data["Close"].ewm(span=20).mean()
-        data["EMA50"] = data["Close"].ewm(span=50).mean()
+latest = data.iloc[-1]
 
-        latest = data.iloc[-1]
+price = latest["Close"]
+ema20 = latest["EMA20"]
+ema50 = latest["EMA50"]
+rsi = latest["RSI"]
 
-        price = latest["Close"]
-        ema20 = latest["EMA20"]
-        ema50 = latest["EMA50"]
+recent_high = data["High"].tail(20).max()
+recent_low = data["Low"].tail(20).min()
 
-        # ---------------------------
-        # SIGNAL LOGIC (IMPROVED)
-        # ---------------------------
-        if ema20 > ema50 and price > ema20:
-            signal = "BUY 🚀"
-            color = "green"
-        elif ema20 < ema50 and price < ema20:
-            signal = "SELL 🔻"
-            color = "red"
-        else:
-            signal = "WAIT ⏳"
-            color = "yellow"
+# ---------------------------
+# SIGNAL SYSTEM
+# ---------------------------
+signal = "WAIT"
+entry = None
+sl = None
+target = None
+confidence = "LOW"
 
-        # ---------------------------
-        # DISPLAY
-        # ---------------------------
-        st.metric("💰 Price", f"${price:.2f}")
+# BUY CONDITION
+if ema20 > ema50 and price > ema20 and rsi < 70:
 
-        st.markdown(f"""
-        <h2 style='color:{color};'>📊 Signal: {signal}</h2>
-        """, unsafe_allow_html=True)
+    entry = ema20
+    sl = recent_low
+    risk = entry - sl
+    target = entry + (risk * 2)
 
-        # ---------------------------
-        # CHART
-        # ---------------------------
-        st.line_chart(data.set_index("Time")[["Close","EMA20","EMA50"]])
+    if price <= ema20 * 1.01:
+        signal = "BUY 🚀"
+        confidence = "HIGH"
 
-    # ---------------------------
-    # LIVE MODE REFRESH
-    # ---------------------------
-    if live_mode:
-        time.sleep(3)
-        st.rerun()
-    else:
-        break
+# SELL CONDITION
+elif ema20 < ema50 and price < ema20 and rsi > 30:
+
+    entry = ema20
+    sl = recent_high
+    risk = sl - entry
+    target = entry - (risk * 2)
+
+    if price >= ema20 * 0.99:
+        signal = "SELL 🔻"
+        confidence = "HIGH"
+
+# ---------------------------
+# UI
+# ---------------------------
+time_now = datetime.now().strftime("%I:%M %p")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("💰 Price", f"${price:.2f}")
+col2.metric("📊 Signal", signal)
+col3.metric("⏰ Time", time_now)
+
+# ---------------------------
+# TRADE OUTPUT
+# ---------------------------
+if signal != "WAIT":
+
+    st.success("🎯 TRADE SETUP")
+
+    st.write(f"**Entry:** ${entry:.2f}")
+    st.write(f"**Stop Loss:** ${sl:.2f}")
+    st.write(f"**Target:** ${target:.2f}")
+    st.write(f"**Confidence:** {confidence}")
+
+    rr = abs(target - entry) / abs(entry - sl)
+    st.write(f"**Risk/Reward:** {rr:.2f}")
+
+else:
+    st.warning("⏳ WAIT – No Trade")
+
+# ---------------------------
+# CHART
+# ---------------------------
+st.subheader("📈 Market Trend")
+
+st.line_chart(data.set_index("Time")[["Close","EMA20","EMA50"]])
