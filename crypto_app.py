@@ -20,11 +20,11 @@ symbol_map = {
 symbol = symbol_map[coin]
 
 # -----------------------------
-# DATA FETCH FUNCTION
+# FETCH BINANCE DATA
 # -----------------------------
 def get_binance_data(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=150"
-    data = requests.get(url).json()
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=500"
+    data = requests.get(url, timeout=10).json()
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
@@ -32,15 +32,18 @@ def get_binance_data(symbol):
     ])
 
     df["time"] = pd.to_datetime(df["time"], unit='ms')
-    df["close"] = pd.to_numeric(df["close"])
-    df["high"] = pd.to_numeric(df["high"])
-    df["low"] = pd.to_numeric(df["low"])
+    df["close"] = pd.to_numeric(df["close"], errors='coerce')
+    df["high"] = pd.to_numeric(df["high"], errors='coerce')
+    df["low"] = pd.to_numeric(df["low"], errors='coerce')
 
     return df[["time","close","high","low"]]
 
 
+# -----------------------------
+# BACKUP DATA (YFINANCE)
+# -----------------------------
 def get_backup_data(coin):
-    df = yf.download(f"{coin}-USD", interval="5m", period="1d")
+    df = yf.download(f"{coin}-USD", interval="15m", period="2d")
 
     df = df.reset_index()
 
@@ -59,7 +62,7 @@ def get_backup_data(coin):
 
 
 # -----------------------------
-# GET DATA
+# LOAD DATA
 # -----------------------------
 try:
     df = get_binance_data(symbol)
@@ -74,7 +77,7 @@ except:
 # -----------------------------
 df = df.dropna()
 
-if len(df) < 50:
+if len(df) < 100:
     st.error("❌ Not enough data")
     st.stop()
 
@@ -91,6 +94,7 @@ loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
 rs = gain / loss
 df["RSI"] = 100 - (100 / (1 + rs))
 
+
 latest = df.iloc[-1]
 
 price = float(latest["close"])
@@ -100,26 +104,36 @@ rsi = float(latest["RSI"])
 
 
 # -----------------------------
-# SIGNAL LOGIC
+# SIGNAL LOGIC (IMPROVED)
 # -----------------------------
 signal = "HOLD"
-confidence = 0
+confidence = 50
 
-if price > ema20 > ema50 and rsi < 70:
+if price > ema20 > ema50 and rsi > 50 and rsi < 70:
     signal = "BUY"
-    confidence = 80
+    confidence = 85
 
-elif price < ema20 < ema50 and rsi > 30:
+elif price < ema20 < ema50 and rsi < 50 and rsi > 30:
     signal = "SELL"
-    confidence = 80
+    confidence = 85
 
 
 # -----------------------------
-# ENTRY / TARGET / SL
+# ENTRY / TARGET / STOP LOSS
 # -----------------------------
 entry = price
-target = price * (1.02 if signal == "BUY" else 0.98)
-stop_loss = price * (0.98 if signal == "BUY" else 1.02)
+
+if signal == "BUY":
+    target = price * 1.025
+    stop_loss = price * 0.98
+
+elif signal == "SELL":
+    target = price * 0.975
+    stop_loss = price * 1.02
+
+else:
+    target = price
+    stop_loss = price
 
 
 # -----------------------------
@@ -142,13 +156,14 @@ st.write(f"Stop Loss: {round(stop_loss,2)}")
 
 
 # -----------------------------
-# TIME (12 HOUR FORMAT)
+# TIME (12H FORMAT)
 # -----------------------------
 now = datetime.now().strftime("%I:%M %p")
 st.write(f"🕒 Signal Time: {now}")
 
 
 # -----------------------------
-# CHART
+# CHART (CLEAN)
 # -----------------------------
-st.line_chart(df.set_index("time")[["close","EMA20","EMA50"]])
+chart_data = df.set_index("time")[["close","EMA20","EMA50"]].tail(150)
+st.line_chart(chart_data)
